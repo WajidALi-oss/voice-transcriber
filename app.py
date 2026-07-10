@@ -26,8 +26,11 @@ import streamlit as st
 OPENAI_URL = "https://api.openai.com/v1/audio/transcriptions"
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+# Groq hosts Whisper behind an OpenAI-compatible endpoint (keys start with gsk_).
+GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
 OPENAI_MODELS = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"]
+GROQ_MODELS = ["whisper-large-v3-turbo", "whisper-large-v3"]
 
 # UI label -> per-engine language code.
 # OpenAI expects ISO 639-1 (en/ur/ps); ElevenLabs expects ISO 639-3 (eng/urd/pus).
@@ -224,7 +227,11 @@ def _run_with_failover(make_request, keys, engine, dead, extract=None):
     )
 
 
-def transcribe_openai(raw, filename, ext, keys, model, lang, prompt, dead):
+def transcribe_openai_compatible(raw, filename, ext, keys, model, lang, prompt, dead,
+                                 url=OPENAI_URL, engine="OpenAI"):
+    """Transcribe via any OpenAI-compatible /audio/transcriptions endpoint.
+    OpenAI itself and Groq's Whisper share the exact same request shape
+    (Bearer auth + multipart: file, model, response_format, language, prompt)."""
     mime = MIME_BY_EXT.get(ext, "application/octet-stream")
     data = {"model": model, "response_format": "json"}
     if lang:
@@ -234,14 +241,14 @@ def transcribe_openai(raw, filename, ext, keys, model, lang, prompt, dead):
 
     def make_request(key):
         return requests.post(
-            OPENAI_URL,
+            url,
             headers={"Authorization": f"Bearer {key}"},
             files={"file": (filename, io.BytesIO(raw), mime)},
             data=data,
             timeout=300,
         )
 
-    return _run_with_failover(make_request, keys, "OpenAI", dead)
+    return _run_with_failover(make_request, keys, engine, dead)
 
 
 def transcribe_elevenlabs(raw, filename, ext, keys, lang, dead):
@@ -314,25 +321,26 @@ def build_zip(items) -> bytes:
 st.set_page_config(page_title="Voice Note Transcriber", page_icon="🎙️", layout="centered")
 
 st.sidebar.title("⚙️ Settings")
-engine = st.sidebar.radio("Transcription engine", ["OpenAI", "ElevenLabs Scribe"])
+engine = st.sidebar.radio(
+    "Transcription engine", ["OpenAI", "ElevenLabs Scribe", "Groq Whisper"])
+
+_FAILOVER_HELP = ("Optional fallback keys, added after any in secrets.toml. "
+                  "Used for automatic failover.")
 
 if engine == "OpenAI":
     model = st.sidebar.selectbox("OpenAI model", OPENAI_MODELS)
     extra = st.sidebar.text_area(
-        "Extra OpenAI key(s) — one per line",
-        height=70,
-        help="Optional fallback keys, added after any in secrets.toml. "
-             "Used for automatic failover.",
-    )
+        "Extra OpenAI key(s) — one per line", height=70, help=_FAILOVER_HELP)
     keys = get_keys("OPENAI_API_KEYS", "OPENAI_API_KEY", extra)
+elif engine == "Groq Whisper":
+    model = st.sidebar.selectbox("Groq model", GROQ_MODELS)
+    extra = st.sidebar.text_area(
+        "Extra Groq key(s) — one per line", height=70, help=_FAILOVER_HELP)
+    keys = get_keys("GROQ_API_KEYS", "GROQ_API_KEY", extra)
 else:
     model = None
     extra = st.sidebar.text_area(
-        "Extra ElevenLabs key(s) — one per line",
-        height=70,
-        help="Optional fallback keys, added after any in secrets.toml. "
-             "Used for automatic failover.",
-    )
+        "Extra ElevenLabs key(s) — one per line", height=70, help=_FAILOVER_HELP)
     keys = get_keys("ELEVENLABS_API_KEYS", "ELEVENLABS_API_KEY", extra)
 
 if len(keys) > 1:
@@ -375,14 +383,14 @@ st.sidebar.info(
 st.title("🎙️ Voice Note Transcriber")
 st.caption("English · Urdu · Pashto — including code-switched (mixed) speech.")
 
-if engine == "OpenAI":
+if engine in ("OpenAI", "Groq Whisper"):
     prompt = st.text_area(
-        "Context prompt (OpenAI only)", value=DEFAULT_PROMPT, height=90,
+        "Context prompt (OpenAI & Groq)", value=DEFAULT_PROMPT, height=90,
         help="Steers spelling, names and mixed-language handling. Ignored by ElevenLabs.",
     )
 else:
     prompt = None
-    st.caption("ℹ️ The context prompt is only used by the OpenAI engine.")
+    st.caption("ℹ️ The context prompt is used only by the OpenAI and Groq engines.")
 
 uploaded = st.file_uploader(
     "Upload voice notes",
@@ -429,9 +437,13 @@ if transcribe_clicked and sources and keys:
                  "romanized": False, "romanize_error": None}
         try:
             if engine == "OpenAI":
-                entry["text"], entry["used"] = transcribe_openai(
+                entry["text"], entry["used"] = transcribe_openai_compatible(
                     send_bytes, send_name, send_ext, keys, model,
-                    lang_codes["openai"], prompt, dead)
+                    lang_codes["openai"], prompt, dead, OPENAI_URL, "OpenAI")
+            elif engine == "Groq Whisper":
+                entry["text"], entry["used"] = transcribe_openai_compatible(
+                    send_bytes, send_name, send_ext, keys, model,
+                    lang_codes["openai"], prompt, dead, GROQ_URL, "Groq")
             else:
                 entry["text"], entry["used"] = transcribe_elevenlabs(
                     send_bytes, send_name, send_ext, keys, lang_codes["elevenlabs"], dead)
