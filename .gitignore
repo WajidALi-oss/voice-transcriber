@@ -1,0 +1,16 @@
+# Secrets — never commit real API keys
+.streamlit/secrets.toml
+
+# Python virtual environment
+venv/
+.venv/
+
+# Python bytecode / caches
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor cruft
+.DS_Store
+.vscode/
+.idea/
