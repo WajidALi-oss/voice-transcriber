@@ -391,6 +391,14 @@ uploaded = st.file_uploader(
     help="WhatsApp .opus / .m4a supported. .opus and .amr are auto-converted to mp3.",
 )
 
+st.markdown("**🎤 …or record straight from your microphone**")
+recorded = st.audio_input("Press to record, press again to stop — then hit Transcribe.")
+
+# Combine uploaded files and the mic recording into one list of (name, bytes).
+sources = [(uf.name, uf.getvalue()) for uf in (uploaded or [])]
+if recorded is not None:
+    sources.append(("mic-recording.wav", recorded.getvalue()))
+
 if not keys:
     st.warning(
         "No API key found. Add one or more keys in `.streamlit/secrets.toml` "
@@ -398,11 +406,11 @@ if not keys:
     )
 
 transcribe_clicked = st.button(
-    "Transcribe", type="primary", disabled=not (uploaded and keys)
+    "Transcribe", type="primary", disabled=not (sources and keys)
 )
 
 # --- Run transcription, store results in session_state ------------------------
-if transcribe_clicked and uploaded and keys:
+if transcribe_clicked and sources and keys:
     # Clear any stale edited-transcript widget state from a previous run.
     for k in [k for k in st.session_state if k.startswith("txt_")]:
         del st.session_state[k]
@@ -410,14 +418,13 @@ if transcribe_clicked and uploaded and keys:
     dead = set()  # keys that failed (retryably) — skipped for the rest of this batch
     results = []
     progress = st.progress(0.0, text="Starting…")
-    for idx, uf in enumerate(uploaded):
-        progress.progress(idx / len(uploaded), text=f"Transcribing {uf.name}…")
-        raw = uf.getvalue()
-        ext = get_ext(uf.name)
+    for idx, (name, raw) in enumerate(sources):
+        progress.progress(idx / len(sources), text=f"Transcribing {name}…")
+        ext = get_ext(name)
         send_bytes, send_ext, note = maybe_convert_to_mp3(raw, ext)
-        send_name = Path(uf.name).with_suffix("." + send_ext).name
+        send_name = Path(name).with_suffix("." + send_ext).name
 
-        entry = {"name": uf.name, "audio": raw, "mime": MIME_BY_EXT.get(ext),
+        entry = {"name": name, "audio": raw, "mime": MIME_BY_EXT.get(ext),
                  "note": note, "text": "", "used": None, "error": None,
                  "romanized": False, "romanize_error": None}
         try:
@@ -433,7 +440,7 @@ if transcribe_clicked and uploaded and keys:
 
         # Optional: transliterate the transcript into Roman/Latin script.
         if romanize and entry["error"] is None and entry["text"].strip():
-            progress.progress(idx / len(uploaded), text=f"Romanizing {uf.name}…")
+            progress.progress(idx / len(sources), text=f"Romanizing {name}…")
             use_openai = romanize_method.startswith("OpenAI") and openai_keys
             if use_openai:
                 try:
