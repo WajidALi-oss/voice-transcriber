@@ -7,10 +7,13 @@ Engines:
   * OpenAI   — /v1/audio/transcriptions (gpt-4o-transcribe, gpt-4o-mini-transcribe, whisper-1)
   * ElevenLabs Scribe — /v1/speech-to-text (scribe_v2)
 
-Optimised for English + Urdu + Pashto, including code-switched (mixed) speech.
+Multi-key failover: give each engine several API keys and the app automatically
+rotates to the next key when one returns an auth / quota / rate-limit / server
+error. Optimised for English + Urdu + Pashto, including code-switched speech.
 """
 
 import io
+import re
 import zipfile
 from pathlib import Path
 
@@ -57,30 +60,73 @@ MIME_BY_EXT = {
     "aac": "audio/aac", "amr": "audio/amr",
 }
 
-# Placeholder values shipped in secrets.toml — treated as "not set" so the
-# sidebar fallback field is used until the user pastes a real key.
+# Placeholder values shipped in secrets.toml — treated as "not set" so a
+# real key (from another slot or the sidebar) is used instead.
 PLACEHOLDER_MARKERS = ("REPLACE_WITH", "PASTE_YOUR", "YOUR_KEY_HERE")
+
+# HTTP statuses where a *different* key might succeed (bad/expired key, no
+# permission, rate limit / quota, or a transient server error). Any other 4xx
+# is a request problem (e.g. bad audio) that another key won't fix, so it is
+# surfaced immediately instead of burning through every key.
+RETRYABLE_STATUSES = {401, 403, 408, 429, 500, 502, 503, 504}
 
 
 # -----------------------------------------------------------------------------
-# Helpers
+# Key handling (multi-key with failover)
 # -----------------------------------------------------------------------------
 def get_ext(filename: str) -> str:
     return Path(filename).suffix.lower().lstrip(".")
 
 
-def resolve_key(secret_name: str, fallback: str) -> str:
-    """Prefer st.secrets; fall back to the sidebar field. Placeholder values in
-    secrets.toml are ignored so they don't shadow a key typed in the sidebar."""
+def _secret(name):
+    """Read a secret without exploding when no secrets.toml exists at all."""
     try:
-        value = st.secrets.get(secret_name, "")  # raises if no secrets file at all
+        return st.secrets.get(name, None)
     except Exception:
-        value = ""
-    if value and not any(m in value for m in PLACEHOLDER_MARKERS):
-        return value
-    return (fallback or "").strip()
+        return None
 
 
+def _split_keys(value):
+    """Normalise a secret/sidebar value into a list of individual keys.
+    Accepts a TOML array (list) or a string with keys separated by newlines,
+    commas or whitespace. API keys contain none of those, so splitting is safe."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    return re.split(r"[\s,]+", str(value))
+
+
+def _clean_keys(candidates):
+    """Strip, drop empties/placeholders, and de-duplicate while keeping order."""
+    seen, out = set(), []
+    for k in candidates:
+        k = (k or "").strip()
+        if not k or any(m in k for m in PLACEHOLDER_MARKERS):
+            continue
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
+def get_keys(plural_name, singular_name, sidebar_value):
+    """Collect all usable keys for an engine, in priority order:
+    secrets[PLURAL] (a list) -> secrets[SINGULAR] -> sidebar field."""
+    candidates = []
+    candidates += _split_keys(_secret(plural_name))
+    candidates += _split_keys(_secret(singular_name))
+    candidates += _split_keys(sidebar_value)
+    return _clean_keys(candidates)
+
+
+def _mask(key: str) -> str:
+    return f"…{key[-4:]}" if len(key) >= 4 else "…"
+
+
+# -----------------------------------------------------------------------------
+# Audio conversion
+# -----------------------------------------------------------------------------
 def maybe_convert_to_mp3(raw: bytes, ext: str):
     """Return (bytes, ext, note). Transcode 'unusual' formats to mp3 via
     pydub/ffmpeg. On any failure (e.g. ffmpeg missing) fall back to the original
@@ -105,6 +151,9 @@ def maybe_convert_to_mp3(raw: bytes, ext: str):
         )
 
 
+# -----------------------------------------------------------------------------
+# Transcription (with per-request key failover)
+# -----------------------------------------------------------------------------
 def _format_api_error(engine: str, resp: requests.Response) -> str:
     detail = resp.text
     try:
@@ -113,43 +162,83 @@ def _format_api_error(engine: str, resp: requests.Response) -> str:
         detail = err.get("message", err) if isinstance(err, dict) else err
     except Exception:
         pass
-    return f"{engine} API returned {resp.status_code}: {detail}"
+    return f"{engine} returned {resp.status_code}: {detail}"
 
 
-def transcribe_openai(raw, filename, ext, api_key, model, lang, prompt) -> str:
-    files = {"file": (filename, io.BytesIO(raw), MIME_BY_EXT.get(ext, "application/octet-stream"))}
+def _run_with_failover(make_request, keys, engine, dead):
+    """Try each key until one returns HTTP 200.
+
+    `make_request(key)` must build and send a fresh request (the upload body is
+    single-use, so it is rebuilt per attempt) and return a requests.Response.
+    Keys that fail with a retryable error are added to the shared `dead` set so
+    the rest of a batch skips them. Returns (transcript_text, key_label)."""
+    if not keys:
+        raise RuntimeError(f"No {engine} API key configured.")
+
+    # Skip keys already known-dead this batch; if all are dead, try them anyway.
+    order = [(i, k) for i, k in enumerate(keys, 1) if k not in dead] or list(enumerate(keys, 1))
+    errors = []
+    for i, key in order:
+        label = f"key {i}/{len(keys)} ({_mask(key)})"
+        try:
+            resp = make_request(key)
+        except requests.RequestException as exc:
+            errors.append(f"{label}: network error: {exc}")
+            dead.add(key)
+            continue
+
+        if resp.status_code == 200:
+            return resp.json().get("text", ""), label
+
+        msg = _format_api_error(engine, resp)
+        if resp.status_code in RETRYABLE_STATUSES:
+            errors.append(f"{label}: {msg}")
+            dead.add(key)
+            continue
+        # Non-retryable (e.g. 400 bad audio): another key won't help.
+        raise RuntimeError(f"{engine} request failed — {msg}\n(tried {label})")
+
+    raise RuntimeError(
+        f"All {len(keys)} {engine} key(s) failed:\n" + "\n".join("• " + e for e in errors)
+    )
+
+
+def transcribe_openai(raw, filename, ext, keys, model, lang, prompt, dead):
+    mime = MIME_BY_EXT.get(ext, "application/octet-stream")
     data = {"model": model, "response_format": "json"}
     if lang:
         data["language"] = lang
     if prompt:
         data["prompt"] = prompt
-    resp = requests.post(
-        OPENAI_URL,
-        headers={"Authorization": f"Bearer {api_key}"},
-        files=files,
-        data=data,
-        timeout=300,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(_format_api_error("OpenAI", resp))
-    return resp.json().get("text", "")
+
+    def make_request(key):
+        return requests.post(
+            OPENAI_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            files={"file": (filename, io.BytesIO(raw), mime)},
+            data=data,
+            timeout=300,
+        )
+
+    return _run_with_failover(make_request, keys, "OpenAI", dead)
 
 
-def transcribe_elevenlabs(raw, filename, ext, api_key, lang) -> str:
-    files = {"file": (filename, io.BytesIO(raw), MIME_BY_EXT.get(ext, "application/octet-stream"))}
+def transcribe_elevenlabs(raw, filename, ext, keys, lang, dead):
+    mime = MIME_BY_EXT.get(ext, "application/octet-stream")
     data = {"model_id": "scribe_v2", "tag_audio_events": "false"}
     if lang:
         data["language_code"] = lang
-    resp = requests.post(
-        ELEVENLABS_URL,
-        headers={"xi-api-key": api_key},
-        files=files,
-        data=data,
-        timeout=300,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(_format_api_error("ElevenLabs", resp))
-    return resp.json().get("text", "")
+
+    def make_request(key):
+        return requests.post(
+            ELEVENLABS_URL,
+            headers={"xi-api-key": key},
+            files={"file": (filename, io.BytesIO(raw), mime)},
+            data=data,
+            timeout=300,
+        )
+
+    return _run_with_failover(make_request, keys, "ElevenLabs", dead)
 
 
 def build_zip(items) -> bytes:
@@ -170,18 +259,29 @@ engine = st.sidebar.radio("Transcription engine", ["OpenAI", "ElevenLabs Scribe"
 
 if engine == "OpenAI":
     model = st.sidebar.selectbox("OpenAI model", OPENAI_MODELS)
-    key_field = st.sidebar.text_input(
-        "OpenAI API key (fallback)", type="password",
-        help="Used only if OPENAI_API_KEY is not set in .streamlit/secrets.toml.",
+    extra = st.sidebar.text_area(
+        "Extra OpenAI key(s) — one per line",
+        height=70,
+        help="Optional fallback keys, added after any in secrets.toml. "
+             "Used for automatic failover.",
     )
-    api_key = resolve_key("OPENAI_API_KEY", key_field)
+    keys = get_keys("OPENAI_API_KEYS", "OPENAI_API_KEY", extra)
 else:
     model = None
-    key_field = st.sidebar.text_input(
-        "ElevenLabs API key (fallback)", type="password",
-        help="Used only if ELEVENLABS_API_KEY is not set in .streamlit/secrets.toml.",
+    extra = st.sidebar.text_area(
+        "Extra ElevenLabs key(s) — one per line",
+        height=70,
+        help="Optional fallback keys, added after any in secrets.toml. "
+             "Used for automatic failover.",
     )
-    api_key = resolve_key("ELEVENLABS_API_KEY", key_field)
+    keys = get_keys("ELEVENLABS_API_KEYS", "ELEVENLABS_API_KEY", extra)
+
+if len(keys) > 1:
+    st.sidebar.success(f"🔑 {len(keys)} keys loaded — failover enabled.")
+elif len(keys) == 1:
+    st.sidebar.info("🔑 1 key loaded. Add more (secrets or above) for failover.")
+else:
+    st.sidebar.error("No API key found. Add keys to secrets.toml or the box above.")
 
 language_label = st.sidebar.selectbox("Language", list(LANGUAGES.keys()))
 lang_codes = LANGUAGES[language_label]
@@ -211,22 +311,23 @@ uploaded = st.file_uploader(
     help="WhatsApp .opus / .m4a supported. .opus and .amr are auto-converted to mp3.",
 )
 
-if not api_key:
+if not keys:
     st.warning(
-        "No API key found. Add it in the sidebar, or set it in "
-        "`.streamlit/secrets.toml`, to enable transcription."
+        "No API key found. Add one or more keys in `.streamlit/secrets.toml` "
+        "(or the sidebar) to enable transcription."
     )
 
 transcribe_clicked = st.button(
-    "Transcribe", type="primary", disabled=not (uploaded and api_key)
+    "Transcribe", type="primary", disabled=not (uploaded and keys)
 )
 
 # --- Run transcription, store results in session_state ------------------------
-if transcribe_clicked and uploaded and api_key:
+if transcribe_clicked and uploaded and keys:
     # Clear any stale edited-transcript widget state from a previous run.
     for k in [k for k in st.session_state if k.startswith("txt_")]:
         del st.session_state[k]
 
+    dead = set()  # keys that failed (retryably) — skipped for the rest of this batch
     results = []
     progress = st.progress(0.0, text="Starting…")
     for idx, uf in enumerate(uploaded):
@@ -237,25 +338,27 @@ if transcribe_clicked and uploaded and api_key:
         send_name = Path(uf.name).with_suffix("." + send_ext).name
 
         entry = {"name": uf.name, "audio": raw, "mime": MIME_BY_EXT.get(ext),
-                 "note": note, "text": "", "error": None}
+                 "note": note, "text": "", "used": None, "error": None}
         try:
             if engine == "OpenAI":
-                entry["text"] = transcribe_openai(
-                    send_bytes, send_name, send_ext, api_key, model,
-                    lang_codes["openai"], prompt)
+                entry["text"], entry["used"] = transcribe_openai(
+                    send_bytes, send_name, send_ext, keys, model,
+                    lang_codes["openai"], prompt, dead)
             else:
-                entry["text"] = transcribe_elevenlabs(
-                    send_bytes, send_name, send_ext, api_key, lang_codes["elevenlabs"])
+                entry["text"], entry["used"] = transcribe_elevenlabs(
+                    send_bytes, send_name, send_ext, keys, lang_codes["elevenlabs"], dead)
         except Exception as exc:
             entry["error"] = str(exc)
         results.append(entry)
 
     progress.progress(1.0, text="Done.")
     st.session_state["results"] = results
+    st.session_state["engine_used"] = engine
 
 # --- Render results -----------------------------------------------------------
 results = st.session_state.get("results", [])
 if results:
+    engine_used = st.session_state.get("engine_used", "")
     st.divider()
     st.header("Transcripts")
     zip_items = []
@@ -269,6 +372,8 @@ if results:
             st.error(item["error"])
             continue
 
+        if item.get("used"):
+            st.caption(f"✅ Transcribed with {engine_used} · {item['used']}")
         base = Path(item["name"]).stem + ".txt"
         edited = st.text_area("Transcript", value=item["text"], height=180, key=f"txt_{i}")
         st.download_button(

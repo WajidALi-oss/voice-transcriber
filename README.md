@@ -8,6 +8,8 @@ where the languages are mixed inside a single voice note.
 - Choose an engine: **OpenAI** or **ElevenLabs Scribe**.
 - Get an editable transcript per file, download each as **.txt**, or grab them
   all as a **.zip**.
+- **Multi-key failover:** give each engine several API keys and the app rotates
+  to the next one automatically if a key hits an auth / quota / rate-limit error.
 
 ## Supported formats
 
@@ -43,10 +45,11 @@ pip install -r requirements.txt
 #    Debian/Ubuntu:  sudo apt install ffmpeg
 #    conda:          conda install -c conda-forge ffmpeg
 
-# 4. Add your API keys — edit .streamlit/secrets.toml and paste your real keys:
-#    OPENAI_API_KEY = "sk-proj-..."
-#    ELEVENLABS_API_KEY = "..."
-#    (You can also paste a key into the sidebar at runtime instead.)
+# 4. Add your API keys — edit .streamlit/secrets.toml. Each engine takes a LIST,
+#    so you can add several keys for automatic failover:
+#    OPENAI_API_KEYS     = ["sk-proj-...", "sk-proj-..."]
+#    ELEVENLABS_API_KEYS = ["sk_...", "sk_..."]
+#    (You can also paste extra keys into the sidebar at runtime.)
 
 # 5. Run
 streamlit run app.py
@@ -54,12 +57,19 @@ streamlit run app.py
 
 Then open the local URL Streamlit prints (usually http://localhost:8501).
 
-### API keys
+### API keys & failover
 
-The app reads keys in this order:
+Each engine accepts **multiple keys**. The app gathers them in this order and
+tries them one by one, skipping any that fail with an auth (401/403),
+rate-limit/quota (429), or server (5xx) error until one succeeds:
 
-1. `st.secrets` — from `.streamlit/secrets.toml` (local) or the Cloud dashboard.
-2. The **password field in the sidebar** (fallback), if no secret is set.
+1. `OPENAI_API_KEYS` / `ELEVENLABS_API_KEYS` — a TOML **list** in
+   `.streamlit/secrets.toml` (local) or the Cloud dashboard.
+2. `OPENAI_API_KEY` / `ELEVENLABS_API_KEY` — a single key (still supported).
+3. Extra keys typed into the **sidebar** box (one per line), used as a fallback.
+
+A non-key error (e.g. a 400 for unsupported audio) fails fast without burning
+through the other keys, and the result shows *which* key transcribed each file.
 
 `.streamlit/secrets.toml` is **gitignored** so your keys are never committed.
 
@@ -72,11 +82,12 @@ The app reads keys in this order:
 2. Go to **https://share.streamlit.io** and sign in with GitHub.
 3. **Create app → From existing repo**, and select your repo/branch and
    `app.py` as the entry point.
-4. Open **Advanced settings → Secrets** and paste:
+4. Open **Advanced settings → Secrets** and paste your keys as lists (add as
+   many as you want for failover):
 
    ```toml
-   OPENAI_API_KEY = "sk-proj-..."
-   ELEVENLABS_API_KEY = "..."
+   OPENAI_API_KEYS     = ["sk-proj-...", "sk-proj-..."]
+   ELEVENLABS_API_KEYS = ["sk_...", "sk_..."]
    ```
 
 5. `packages.txt` (which contains `ffmpeg`) and `requirements.txt` are picked up
