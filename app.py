@@ -307,8 +307,8 @@ def romanize_text(text, keys, dead, model=ROMANIZE_MODEL):
     return result
 
 
-def resolve_display_text(i, native, want_roman, method, oa_keys):
-    """Pick what to show for result `i` from the CURRENT romanize toggle, so
+def resolve_display_text(uid, native, want_roman, method, oa_keys):
+    """Pick what to show for result `uid` from the CURRENT romanize toggle, so
     flipping it switches instantly with no re-transcription.
 
     The native transcript is always kept. Offline romanization is computed on
@@ -317,7 +317,7 @@ def resolve_display_text(i, native, want_roman, method, oa_keys):
     if not want_roman or not native.strip():
         return native, None
     if method.startswith("OpenAI") and oa_keys:
-        cache = f"roman_openai_{i}"
+        cache = f"roman_openai_{uid}"
         if cache not in st.session_state:
             try:
                 st.session_state[cache] = (romanize_text(native, oa_keys, set()), "OpenAI method")
@@ -501,7 +501,7 @@ if transcribe_clicked and sources and keys:
         send_name = Path(name).with_suffix("." + send_ext).name
 
         entry = {"name": name, "audio": raw, "mime": MIME_BY_EXT.get(ext),
-                 "note": note, "text": "", "used": None, "error": None}
+                 "note": note, "text": "", "used": None, "error": None, "model": model}
         try:
             if engine == "OpenAI":
                 entry["text"], entry["used"] = transcribe_openai_compatible(
@@ -521,11 +521,15 @@ if transcribe_clicked and sources and keys:
     progress.progress(1.0, text="Done.")
     st.session_state["results"] = results
     st.session_state["engine_used"] = engine
+    # New run id -> fresh widget keys below, so the text boxes always re-seed
+    # with the new transcript instead of showing the previous run's text.
+    st.session_state["run_id"] = st.session_state.get("run_id", 0) + 1
 
 # --- Render results (romanized vs native chosen live from the toggle) ---------
 results = st.session_state.get("results", [])
 if results:
     engine_used = st.session_state.get("engine_used", "")
+    run_id = st.session_state.get("run_id", 0)
     # A tag for the widget key so toggling romanize re-seeds the text box.
     mode_tag = ("off" if not romanize
                 else "oa" if romanize_method.startswith("OpenAI") else "roman")
@@ -547,12 +551,13 @@ if results:
                 continue
 
             display, roman_note = resolve_display_text(
-                i, item["text"], romanize, romanize_method, openai_keys)
+                f"{run_id}_{i}", item["text"], romanize, romanize_method, openai_keys)
 
             left, right = st.columns([3, 2])
             with left:
                 if item.get("used"):
-                    st.caption(f"✅ {engine_used} · {item['used']}")
+                    model_str = f" · {item['model']}" if item.get("model") else ""
+                    st.caption(f"✅ {engine_used}{model_str} · {item['used']}")
                 st.caption(f"🔤 Romanized · {roman_note}" if roman_note
                            else "🔡 Original native script")
             with right:
@@ -562,13 +567,14 @@ if results:
                     unsafe_allow_html=True)
 
             base = Path(item["name"]).stem + ".txt"
-            # mode_tag in the key so flipping the toggle re-seeds with the right text.
+            # run_id + mode_tag in the key so a new transcription (or a romanize
+            # toggle) always re-seeds the box with the right text.
             edited = st.text_area(
                 "Transcript", value=display, height=170,
-                key=f"txt_{i}_{mode_tag}", label_visibility="collapsed")
+                key=f"txt_{run_id}_{i}_{mode_tag}", label_visibility="collapsed")
             st.download_button(
                 "⬇️ Download .txt", data=edited.encode("utf-8"),
-                file_name=base, mime="text/plain", key=f"dl_{i}",
+                file_name=base, mime="text/plain", key=f"dl_{run_id}_{i}",
                 use_container_width=True)
             zip_items.append((base, edited))
 
