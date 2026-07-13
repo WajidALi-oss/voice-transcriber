@@ -1,8 +1,8 @@
 # App theme (safe to commit — no secrets here).
 [theme]
-base = "light"
+base = "dark"
 primaryColor = "#7C4DFF"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F6F4FF"
-textColor = "#1E1E2E"
+backgroundColor = "#0E0E14"
+secondaryBackgroundColor = "#1A1A24"
+textColor = "#EDEDF2"
 font = "sans serif"
