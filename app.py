@@ -307,6 +307,26 @@ def romanize_text(text, keys, dead, model=ROMANIZE_MODEL):
     return result
 
 
+def resolve_display_text(i, native, want_roman, method, oa_keys):
+    """Pick what to show for result `i` from the CURRENT romanize toggle, so
+    flipping it switches instantly with no re-transcription.
+
+    The native transcript is always kept. Offline romanization is computed on
+    the fly (instant, free); OpenAI romanization is computed once and cached in
+    session_state (with offline fallback). Returns (text, note_or_None)."""
+    if not want_roman or not native.strip():
+        return native, None
+    if method.startswith("OpenAI") and oa_keys:
+        cache = f"roman_openai_{i}"
+        if cache not in st.session_state:
+            try:
+                st.session_state[cache] = (romanize_text(native, oa_keys, set()), "OpenAI method")
+            except Exception as exc:
+                st.session_state[cache] = (romanize_offline(native), f"offline (OpenAI failed: {exc})")
+        return st.session_state[cache]
+    return romanize_offline(native), "offline method"
+
+
 def build_zip(items) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -318,89 +338,134 @@ def build_zip(items) -> bytes:
 # -----------------------------------------------------------------------------
 # UI
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Voice Note Transcriber", page_icon="🎙️", layout="centered")
-
-st.sidebar.title("⚙️ Settings")
-engine = st.sidebar.radio(
-    "Transcription engine", ["OpenAI", "ElevenLabs Scribe", "Groq Whisper"])
-
-_FAILOVER_HELP = ("Optional fallback keys, added after any in secrets.toml. "
-                  "Used for automatic failover.")
-
-if engine == "OpenAI":
-    model = st.sidebar.selectbox("OpenAI model", OPENAI_MODELS)
-    extra = st.sidebar.text_area(
-        "Extra OpenAI key(s) — one per line", height=70, help=_FAILOVER_HELP)
-    keys = get_keys("OPENAI_API_KEYS", "OPENAI_API_KEY", extra)
-elif engine == "Groq Whisper":
-    model = st.sidebar.selectbox("Groq model", GROQ_MODELS)
-    extra = st.sidebar.text_area(
-        "Extra Groq key(s) — one per line", height=70, help=_FAILOVER_HELP)
-    keys = get_keys("GROQ_API_KEYS", "GROQ_API_KEY", extra)
-else:
-    model = None
-    extra = st.sidebar.text_area(
-        "Extra ElevenLabs key(s) — one per line", height=70, help=_FAILOVER_HELP)
-    keys = get_keys("ELEVENLABS_API_KEYS", "ELEVENLABS_API_KEY", extra)
-
-if len(keys) > 1:
-    st.sidebar.success(f"🔑 {len(keys)} keys loaded — failover enabled.")
-elif len(keys) == 1:
-    st.sidebar.info("🔑 1 key loaded. Add more (secrets or above) for failover.")
-else:
-    st.sidebar.error("No API key found. Add keys to secrets.toml or the box above.")
-
-# OpenAI keys power the optional romanization step even when transcribing with
-# ElevenLabs (ElevenLabs' own extra-keys box must not feed the OpenAI list).
-openai_keys = get_keys(
-    "OPENAI_API_KEYS", "OPENAI_API_KEY", extra if engine == "OpenAI" else "")
-
-romanize = st.sidebar.checkbox(
-    "Romanize output (Roman Urdu / Pashto + English)", value=True,
-    help="Transliterates the transcript into Latin script so Urdu and Pashto come "
-         "out in Roman form instead of Arabic/Devanagari.",
+st.set_page_config(
+    page_title="Voice Note Transcriber",
+    page_icon="🎙️",
+    layout="centered",
+    initial_sidebar_state="expanded",
 )
-romanize_method = "Offline (free)"
-if romanize:
-    romanize_method = st.sidebar.radio(
-        "Romanize method",
-        ["Offline (free)", "OpenAI (higher quality)"],
-        help="Offline works instantly with no API or credits. OpenAI produces more "
-             "natural Roman spelling but needs OpenAI credits (falls back to offline).",
+
+st.markdown(
+    """
+    <style>
+      .block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 860px; }
+      .hero {
+          background: linear-gradient(135deg, #7C4DFF 0%, #536DFE 45%, #00B8D4 100%);
+          border-radius: 20px; padding: 2.1rem 1.6rem; text-align: center; color: #fff;
+          box-shadow: 0 12px 34px rgba(83,109,254,.30); margin-bottom: 1.3rem;
+      }
+      .hero .emoji { font-size: 2.7rem; line-height: 1; }
+      .hero h1 { margin: .35rem 0; font-size: 2.15rem; font-weight: 800;
+                 color: #fff; letter-spacing: -.6px; }
+      .hero p { margin: 0; font-size: 1.03rem; opacity: .96; color: #fff; }
+      .chips { margin-top: 1.05rem; display: flex; flex-wrap: wrap; gap: .5rem; justify-content: center; }
+      .chips span { background: rgba(255,255,255,.17); border: 1px solid rgba(255,255,255,.30);
+          padding: .32rem .72rem; border-radius: 999px; font-size: .82rem; font-weight: 600; }
+      .step-label { font-weight: 700; font-size: 1.06rem; margin: .1rem 0 .7rem; }
+      .or-sep { text-align: center; margin: .5rem 0; opacity: .55; font-weight: 700; letter-spacing: .5px; }
+      .stButton > button, .stDownloadButton > button { border-radius: 10px; font-weight: 600; }
+      button[kind="primary"], [data-testid="stBaseButton-primary"] {
+          background: linear-gradient(135deg, #7C4DFF, #536DFE) !important; border: none !important;
+          box-shadow: 0 6px 16px rgba(124,77,255,.35) !important; }
+      section[data-testid="stSidebar"] { border-right: 1px solid rgba(124,77,255,.14); }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+with st.sidebar:
+    st.markdown("## ⚙️ Settings")
+
+    st.markdown("**🎛️ Transcription engine**")
+    engine = st.radio(
+        "Transcription engine", ["OpenAI", "ElevenLabs Scribe", "Groq Whisper"],
+        label_visibility="collapsed")
+
+    _FAILOVER_HELP = ("Optional fallback keys, added after any in secrets.toml. "
+                      "Used for automatic failover.")
+    if engine == "OpenAI":
+        model = st.selectbox("OpenAI model", OPENAI_MODELS)
+        extra = st.text_area("Extra OpenAI key(s) — one per line", height=70, help=_FAILOVER_HELP)
+        keys = get_keys("OPENAI_API_KEYS", "OPENAI_API_KEY", extra)
+    elif engine == "Groq Whisper":
+        model = st.selectbox("Groq model", GROQ_MODELS)
+        extra = st.text_area("Extra Groq key(s) — one per line", height=70, help=_FAILOVER_HELP)
+        keys = get_keys("GROQ_API_KEYS", "GROQ_API_KEY", extra)
+    else:
+        model = None
+        extra = st.text_area("Extra ElevenLabs key(s) — one per line", height=70, help=_FAILOVER_HELP)
+        keys = get_keys("ELEVENLABS_API_KEYS", "ELEVENLABS_API_KEY", extra)
+
+    if len(keys) > 1:
+        st.success(f"🔑 {len(keys)} keys loaded — failover on.")
+    elif len(keys) == 1:
+        st.info("🔑 1 key loaded. Add more for failover.")
+    else:
+        st.error("No API key found. Add keys to secrets.toml or above.")
+
+    # OpenAI keys power the optional romanization step even when transcribing with
+    # ElevenLabs/Groq (their own extra-keys box must not feed the OpenAI list).
+    openai_keys = get_keys(
+        "OPENAI_API_KEYS", "OPENAI_API_KEY", extra if engine == "OpenAI" else "")
+
+    st.divider()
+    st.markdown("**🌐 Output**")
+    language_label = st.selectbox("Language", list(LANGUAGES.keys()))
+    lang_codes = LANGUAGES[language_label]
+
+    romanize = st.checkbox(
+        "Romanize output (Roman Urdu / Pashto)", value=True,
+        help="Transliterates Urdu/Pashto into Latin script. Toggle any time to "
+             "switch a transcript between Roman and original script.",
     )
-    if romanize_method.startswith("OpenAI") and not openai_keys:
-        st.sidebar.caption("⚠️ No OpenAI key found — will use offline transliteration.")
+    romanize_method = "Offline (free)"
+    if romanize:
+        romanize_method = st.radio(
+            "Romanize method", ["Offline (free)", "OpenAI (higher quality)"],
+            help="Offline is instant & free. OpenAI is more natural but needs credits "
+                 "(auto-falls back to offline).",
+        )
+        if romanize_method.startswith("OpenAI") and not openai_keys:
+            st.caption("⚠️ No OpenAI key — will use offline transliteration.")
 
-language_label = st.sidebar.selectbox("Language", list(LANGUAGES.keys()))
-lang_codes = LANGUAGES[language_label]
+    st.divider()
+    st.caption("💡 Keep **Auto-detect** for mixed-language notes — forcing one "
+               "language can push everything into the wrong script.")
 
-st.sidebar.info(
-    "**Keep Auto-detect for mixed-language voice notes.** When Urdu, Pashto and "
-    "English are code-switched in one recording, forcing a single language can "
-    "push the whole transcript into the wrong script."
+st.markdown(
+    """
+    <div class="hero">
+      <div class="emoji">🎙️</div>
+      <h1>Voice Note Transcriber</h1>
+      <p>English · Urdu · Pashto — accurate even when they're mixed in one recording</p>
+      <div class="chips">
+        <span>⚡ 3 engines</span><span>🔁 Auto key-failover</span>
+        <span>🔤 Romanize</span><span>🎤 Record or upload</span>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-st.title("🎙️ Voice Note Transcriber")
-st.caption("English · Urdu · Pashto — including code-switched (mixed) speech.")
-
-if engine in ("OpenAI", "Groq Whisper"):
-    prompt = st.text_area(
-        "Context prompt (OpenAI & Groq)", value=DEFAULT_PROMPT, height=90,
-        help="Steers spelling, names and mixed-language handling. Ignored by ElevenLabs.",
+with st.container(border=True):
+    st.markdown('<div class="step-label">1️⃣&nbsp; Add your audio</div>', unsafe_allow_html=True)
+    uploaded = st.file_uploader(
+        "Upload voice notes", type=UPLOAD_TYPES, accept_multiple_files=True,
+        help="WhatsApp .opus / .m4a supported. .opus and .amr are auto-converted to mp3.",
+        label_visibility="collapsed",
     )
-else:
-    prompt = None
-    st.caption("ℹ️ The context prompt is used only by the OpenAI and Groq engines.")
+    st.markdown('<div class="or-sep">— or record from your mic —</div>', unsafe_allow_html=True)
+    recorded = st.audio_input("Record from microphone", label_visibility="collapsed")
 
-uploaded = st.file_uploader(
-    "Upload voice notes",
-    type=UPLOAD_TYPES,
-    accept_multiple_files=True,
-    help="WhatsApp .opus / .m4a supported. .opus and .amr are auto-converted to mp3.",
-)
-
-st.markdown("**🎤 …or record straight from your microphone**")
-recorded = st.audio_input("Press to record, press again to stop — then hit Transcribe.")
+    if engine in ("OpenAI", "Groq Whisper"):
+        with st.expander("✏️ Context prompt (optional — guides spelling, names, mixed language)"):
+            prompt = st.text_area(
+                "Context prompt", value=DEFAULT_PROMPT, height=90,
+                label_visibility="collapsed",
+                help="Steers spelling, names and mixed-language handling. Ignored by ElevenLabs.",
+            )
+    else:
+        prompt = None
 
 # Combine uploaded files and the mic recording into one list of (name, bytes).
 sources = [(uf.name, uf.getvalue()) for uf in (uploaded or [])]
@@ -408,19 +473,22 @@ if recorded is not None:
     sources.append(("mic-recording.wav", recorded.getvalue()))
 
 if not keys:
-    st.warning(
-        "No API key found. Add one or more keys in `.streamlit/secrets.toml` "
-        "(or the sidebar) to enable transcription."
-    )
+    st.warning("🔑 No API key found — add keys in the sidebar or `.streamlit/secrets.toml`.")
+elif not sources:
+    st.info("⬆️ Upload a file or record a clip above, then press **Transcribe**.")
 
 transcribe_clicked = st.button(
-    "Transcribe", type="primary", disabled=not (sources and keys)
+    "🎧 Transcribe", type="primary", use_container_width=True,
+    disabled=not (sources and keys),
 )
 
-# --- Run transcription, store results in session_state ------------------------
+# --- Run transcription, store the NATIVE transcript in session_state ----------
+# Romanization is applied at DISPLAY time (below) so the toggle can switch
+# between romanized and native instantly, without re-hitting the API.
 if transcribe_clicked and sources and keys:
-    # Clear any stale edited-transcript widget state from a previous run.
-    for k in [k for k in st.session_state if k.startswith("txt_")]:
+    # Clear stale per-result widget + romanize-cache state from a previous run.
+    for k in [k for k in st.session_state
+              if k.startswith("txt_") or k.startswith("roman_openai_")]:
         del st.session_state[k]
 
     dead = set()  # keys that failed (retryably) — skipped for the rest of this batch
@@ -433,8 +501,7 @@ if transcribe_clicked and sources and keys:
         send_name = Path(name).with_suffix("." + send_ext).name
 
         entry = {"name": name, "audio": raw, "mime": MIME_BY_EXT.get(ext),
-                 "note": note, "text": "", "used": None, "error": None,
-                 "romanized": False, "romanize_error": None}
+                 "note": note, "text": "", "used": None, "error": None}
         try:
             if engine == "OpenAI":
                 entry["text"], entry["used"] = transcribe_openai_compatible(
@@ -449,60 +516,64 @@ if transcribe_clicked and sources and keys:
                     send_bytes, send_name, send_ext, keys, lang_codes["elevenlabs"], dead)
         except Exception as exc:
             entry["error"] = str(exc)
-
-        # Optional: transliterate the transcript into Roman/Latin script.
-        if romanize and entry["error"] is None and entry["text"].strip():
-            progress.progress(idx / len(sources), text=f"Romanizing {name}…")
-            use_openai = romanize_method.startswith("OpenAI") and openai_keys
-            if use_openai:
-                try:
-                    entry["text"] = romanize_text(entry["text"], openai_keys, dead)
-                    entry["romanized"] = "OpenAI"
-                except Exception as exc:
-                    entry["text"] = romanize_offline(entry["text"])
-                    entry["romanized"] = "offline"
-                    entry["romanize_error"] = f"OpenAI romanize failed, used offline ({exc})"
-            else:
-                entry["text"] = romanize_offline(entry["text"])
-                entry["romanized"] = "offline"
         results.append(entry)
 
     progress.progress(1.0, text="Done.")
     st.session_state["results"] = results
     st.session_state["engine_used"] = engine
 
-# --- Render results -----------------------------------------------------------
+# --- Render results (romanized vs native chosen live from the toggle) ---------
 results = st.session_state.get("results", [])
 if results:
     engine_used = st.session_state.get("engine_used", "")
-    st.divider()
-    st.header("Transcripts")
+    # A tag for the widget key so toggling romanize re-seeds the text box.
+    mode_tag = ("off" if not romanize
+                else "oa" if romanize_method.startswith("OpenAI") else "roman")
+    ok_count = sum(1 for it in results if not it.get("error"))
+    st.markdown(
+        f'<div class="step-label">2️⃣&nbsp; Your transcripts '
+        f'<span style="opacity:.5;font-weight:500">({ok_count}/{len(results)} done)</span></div>',
+        unsafe_allow_html=True)
     zip_items = []
     for i, item in enumerate(results):
-        st.subheader(f"📄 {item['name']}")
-        if item.get("audio") is not None:
-            st.audio(item["audio"], format=item.get("mime") or "audio/mpeg")
-        if item.get("note"):
-            st.caption(item["note"])
-        if item.get("error"):
-            st.error(item["error"])
-            continue
+        with st.container(border=True):
+            st.markdown(f"**📄 {item['name']}**")
+            if item.get("audio") is not None:
+                st.audio(item["audio"], format=item.get("mime") or "audio/mpeg")
+            if item.get("note"):
+                st.caption(item["note"])
+            if item.get("error"):
+                st.error(item["error"])
+                continue
 
-        if item.get("used"):
-            st.caption(f"✅ Transcribed with {engine_used} · {item['used']}")
-        if item.get("romanized"):
-            st.caption(f"🔤 Romanized to Latin script · {item['romanized']} method.")
-        if item.get("romanize_error"):
-            st.caption(f"⚠️ {item['romanize_error']}")
-        base = Path(item["name"]).stem + ".txt"
-        edited = st.text_area("Transcript", value=item["text"], height=180, key=f"txt_{i}")
-        st.download_button(
-            "⬇️ Download .txt", data=edited.encode("utf-8"),
-            file_name=base, mime="text/plain", key=f"dl_{i}")
-        zip_items.append((base, edited))
+            display, roman_note = resolve_display_text(
+                i, item["text"], romanize, romanize_method, openai_keys)
+
+            left, right = st.columns([3, 2])
+            with left:
+                if item.get("used"):
+                    st.caption(f"✅ {engine_used} · {item['used']}")
+                st.caption(f"🔤 Romanized · {roman_note}" if roman_note
+                           else "🔡 Original native script")
+            with right:
+                st.markdown(
+                    f"<div style='text-align:right;opacity:.6;font-size:.85rem'>"
+                    f"📝 {len(display.split())} words · {len(display)} chars</div>",
+                    unsafe_allow_html=True)
+
+            base = Path(item["name"]).stem + ".txt"
+            # mode_tag in the key so flipping the toggle re-seeds with the right text.
+            edited = st.text_area(
+                "Transcript", value=display, height=170,
+                key=f"txt_{i}_{mode_tag}", label_visibility="collapsed")
+            st.download_button(
+                "⬇️ Download .txt", data=edited.encode("utf-8"),
+                file_name=base, mime="text/plain", key=f"dl_{i}",
+                use_container_width=True)
+            zip_items.append((base, edited))
 
     if len(zip_items) > 1:
-        st.divider()
         st.download_button(
-            "⬇️ Download all (.zip)", data=build_zip(zip_items),
-            file_name="transcripts.zip", mime="application/zip", key="dl_zip")
+            "⬇️ Download all transcripts (.zip)", data=build_zip(zip_items),
+            file_name="transcripts.zip", mime="application/zip",
+            key="dl_zip", type="primary", use_container_width=True)
