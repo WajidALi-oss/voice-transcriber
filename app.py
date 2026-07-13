@@ -20,6 +20,8 @@ from pathlib import Path
 import requests
 import streamlit as st
 
+from styles import load_styles, copy_button
+
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
@@ -327,6 +329,23 @@ def resolve_display_text(uid, native, want_roman, method, oa_keys):
     return romanize_offline(native), "offline method"
 
 
+def unique_name(name: str, used: set) -> str:
+    """Return `name`, or `name (2)`, `name (3)`… if it's already been handed out.
+    Prevents two sources with the same stem (e.g. an uploaded `note.mp3` and a
+    `note.wav`, or an upload named like the mic clip) from silently overwriting
+    each other in the per-file download and the combined .zip."""
+    if name not in used:
+        used.add(name)
+        return name
+    stem, _, ext = name.rpartition(".")
+    n = 2
+    while f"{stem} ({n}).{ext}" in used:
+        n += 1
+    out = f"{stem} ({n}).{ext}"
+    used.add(out)
+    return out
+
+
 def build_zip(items) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -341,172 +360,13 @@ def build_zip(items) -> bytes:
 st.set_page_config(
     page_title="Voice Note Transcriber",
     page_icon="🎙️",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="expanded",
     menu_items={"about": "Voice Note Transcriber — English · Urdu · Pashto speech-to-text."},
 )
 
-st.markdown(
-    """
-    <style>
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap');
+load_styles()
 
-      :root {
-        --vt-violet: #7C4DFF;
-        --vt-indigo: #536DFE;
-        --vt-cyan:   #00B8D4;
-        --vt-grad: linear-gradient(135deg, #7C4DFF 0%, #536DFE 48%, #00B8D4 100%);
-        --vt-ink:    #1E1E2E;
-        --vt-muted:  #6B6B80;
-        --vt-line:   rgba(124,77,255,.16);
-        --vt-surface: #FFFFFF;
-        --vt-soft:   #F6F4FF;
-        --vt-radius: 16px;
-      }
-
-      html, body, [class*="css"], .stMarkdown, .stApp {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      }
-      .block-container { padding-top: 1.6rem; padding-bottom: 3.5rem; max-width: 880px; }
-
-      /* ---------- Hero ---------- */
-      .hero {
-        position: relative; overflow: hidden;
-        background: var(--vt-grad);
-        border-radius: 22px; padding: 2.4rem 1.6rem 2.1rem;
-        text-align: center; color: #fff;
-        box-shadow: 0 18px 48px -12px rgba(83,109,254,.55);
-        margin-bottom: 1.5rem;
-      }
-      .hero::before {
-        content: ""; position: absolute; inset: 0;
-        background:
-          radial-gradient(60% 90% at 15% 0%, rgba(255,255,255,.28), transparent 60%),
-          radial-gradient(50% 80% at 100% 100%, rgba(0,0,0,.12), transparent 55%);
-        pointer-events: none;
-      }
-      .hero > * { position: relative; z-index: 1; }
-      .hero .badge {
-        display: inline-flex; align-items: center; gap: .4rem;
-        background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.32);
-        padding: .28rem .8rem; border-radius: 999px;
-        font-size: .74rem; font-weight: 700; letter-spacing: .6px; text-transform: uppercase;
-        margin-bottom: .85rem;
-      }
-      .hero .emoji { font-size: 2.9rem; line-height: 1; filter: drop-shadow(0 4px 10px rgba(0,0,0,.18)); }
-      .hero h1 { margin: .45rem 0 .3rem; font-size: 2.3rem; font-weight: 800;
-                 color: #fff; letter-spacing: -.8px; line-height: 1.1; }
-      .hero p { margin: 0 auto; max-width: 30rem; font-size: 1.02rem; opacity: .95; color: #fff; line-height: 1.5; }
-      .chips { margin-top: 1.25rem; display: flex; flex-wrap: wrap; gap: .5rem; justify-content: center; }
-      .chips span {
-        background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.3);
-        padding: .36rem .8rem; border-radius: 999px; font-size: .82rem; font-weight: 600;
-        backdrop-filter: blur(4px);
-      }
-
-      /* ---------- Section step headers ---------- */
-      .step-label {
-        display: flex; align-items: center; gap: .6rem;
-        font-weight: 700; font-size: 1.12rem; color: var(--vt-ink);
-        margin: .1rem 0 .9rem;
-      }
-      .step-label .num {
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 1.7rem; height: 1.7rem; border-radius: 9px;
-        background: var(--vt-grad); color: #fff; font-size: .95rem; font-weight: 800;
-        box-shadow: 0 5px 12px -3px rgba(124,77,255,.5); flex: none;
-      }
-      .step-label .count { margin-left: auto; font-size: .8rem; font-weight: 600; color: var(--vt-muted); }
-      .or-sep {
-        display: flex; align-items: center; gap: .8rem;
-        text-align: center; margin: 1rem 0 .6rem; color: var(--vt-muted);
-        font-weight: 700; font-size: .78rem; letter-spacing: 1px; text-transform: uppercase;
-      }
-      .or-sep::before, .or-sep::after {
-        content: ""; flex: 1; height: 1px; background: var(--vt-line);
-      }
-
-      /* ---------- Bordered containers (cards) ---------- */
-      [data-testid="stVerticalBlockBorderWrapper"] {
-        border-radius: var(--vt-radius) !important;
-        border: 1px solid var(--vt-line) !important;
-        box-shadow: 0 4px 20px -12px rgba(30,30,46,.18);
-        background: var(--vt-surface);
-      }
-
-      /* ---------- Buttons ---------- */
-      .stButton > button, .stDownloadButton > button {
-        border-radius: 11px; font-weight: 600; transition: transform .12s ease, box-shadow .12s ease;
-      }
-      .stButton > button:hover, .stDownloadButton > button:hover { transform: translateY(-1px); }
-      button[kind="primary"], [data-testid="stBaseButton-primary"] {
-        background: var(--vt-grad) !important; border: none !important; color: #fff !important;
-        box-shadow: 0 8px 20px -6px rgba(124,77,255,.5) !important;
-      }
-      button[kind="primary"]:hover, [data-testid="stBaseButton-primary"]:hover {
-        box-shadow: 0 12px 26px -6px rgba(124,77,255,.6) !important;
-      }
-      .stDownloadButton > button {
-        border: 1px solid var(--vt-line) !important; background: var(--vt-soft) !important;
-        color: var(--vt-violet) !important;
-      }
-
-      /* ---------- File uploader dropzone ---------- */
-      [data-testid="stFileUploaderDropzone"] {
-        border: 1.5px dashed var(--vt-line) !important; border-radius: 13px !important;
-        background: var(--vt-soft) !important; transition: border-color .15s ease, background .15s ease;
-      }
-      [data-testid="stFileUploaderDropzone"]:hover {
-        border-color: var(--vt-violet) !important; background: #F0ECFF !important;
-      }
-
-      /* ---------- Text area (transcript) ---------- */
-      .stTextArea textarea {
-        border-radius: 12px !important; font-size: .97rem; line-height: 1.6;
-        border-color: var(--vt-line) !important;
-      }
-      .stTextArea textarea:focus {
-        border-color: var(--vt-violet) !important; box-shadow: 0 0 0 3px rgba(124,77,255,.15) !important;
-      }
-
-      /* ---------- Result meta pills ---------- */
-      .meta-row { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .1rem 0 .55rem; }
-      .pill {
-        display: inline-flex; align-items: center; gap: .3rem;
-        padding: .22rem .62rem; border-radius: 999px; font-size: .76rem; font-weight: 600;
-        border: 1px solid transparent; white-space: nowrap;
-      }
-      .pill.ok    { background: #E7F7EE; color: #12805B; border-color: #BFE9D3; }
-      .pill.info  { background: var(--vt-soft); color: var(--vt-violet); border-color: var(--vt-line); }
-      .pill.count { margin-left: auto; background: transparent; color: var(--vt-muted);
-                    font-family: 'JetBrains Mono', monospace; font-size: .74rem; }
-      .file-title { display: flex; align-items: center; gap: .5rem; font-weight: 700;
-                    font-size: 1.02rem; color: var(--vt-ink); margin-bottom: .5rem; word-break: break-all; }
-      .file-title .ic {
-        display: inline-flex; align-items: center; justify-content: center; flex: none;
-        width: 1.9rem; height: 1.9rem; border-radius: 8px; background: var(--vt-soft); font-size: 1rem;
-      }
-
-      /* ---------- Sidebar ---------- */
-      section[data-testid="stSidebar"] { border-right: 1px solid var(--vt-line); }
-      section[data-testid="stSidebar"] .block-container { padding-top: 1.2rem; }
-      .side-head {
-        display: flex; align-items: center; gap: .5rem;
-        font-size: .78rem; font-weight: 700; letter-spacing: .8px; text-transform: uppercase;
-        color: var(--vt-muted); margin: .3rem 0 .55rem;
-      }
-
-      /* ---------- Progress ---------- */
-      [data-testid="stProgress"] > div > div > div > div { background: var(--vt-grad) !important; }
-
-      /* ---------- Footer ---------- */
-      .vt-footer { text-align: center; color: var(--vt-muted); font-size: .82rem;
-                   margin-top: 2.2rem; padding-top: 1.2rem; border-top: 1px solid var(--vt-line); }
-      .vt-footer b { color: var(--vt-violet); }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
 with st.sidebar:
     st.markdown('<div class="side-head" style="font-size:.95rem;color:var(--vt-ink)">'
@@ -568,163 +428,207 @@ with st.sidebar:
     st.caption("💡 Keep **Auto-detect** for mixed-language notes — forcing one "
                "language can push everything into the wrong script.")
 
-st.markdown(
-    """
-    <div class="hero">
-      <div class="badge">🔊 Speech → Text</div>
-      <div class="emoji">🎙️</div>
-      <h1>Voice Note Transcriber</h1>
-      <p>English · Urdu · Pashto — accurate even when they're mixed together in a single recording.</p>
-      <div class="chips">
-        <span>⚡ 3 engines</span><span>🔁 Auto key-failover</span>
-        <span>🔤 Romanize</span><span>🎤 Record or upload</span>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
 
-with st.container(border=True):
-    st.markdown('<div class="step-label"><span class="num">1</span> Add your audio</div>',
-                unsafe_allow_html=True)
-    uploaded = st.file_uploader(
-        "Upload voice notes", type=UPLOAD_TYPES, accept_multiple_files=True,
-        help="WhatsApp .opus / .m4a supported. .opus and .amr are auto-converted to mp3.",
-        label_visibility="collapsed",
-    )
-    st.markdown('<div class="or-sep">— or record from your mic —</div>', unsafe_allow_html=True)
-    recorded = st.audio_input("Record from microphone", label_visibility="collapsed")
+# --- Everything below is centered in a constrained middle column ---------------
+_, body, _ = st.columns([1, 2.4, 1])
 
-    if engine in ("OpenAI", "Groq Whisper"):
-        with st.expander("✏️ Context prompt (optional — guides spelling, names, mixed language)"):
-            prompt = st.text_area(
-                "Context prompt", value=DEFAULT_PROMPT, height=90,
-                label_visibility="collapsed",
-                help="Steers spelling, names and mixed-language handling. Ignored by ElevenLabs.",
-            )
-    else:
-        prompt = None
-
-# Combine uploaded files and the mic recording into one list of (name, bytes).
-sources = [(uf.name, uf.getvalue()) for uf in (uploaded or [])]
-if recorded is not None:
-    sources.append(("mic-recording.wav", recorded.getvalue()))
-
-if not keys:
-    st.warning("🔑 No API key found — add keys in the sidebar or `.streamlit/secrets.toml`.")
-elif not sources:
-    st.info("⬆️ Upload a file or record a clip above, then press **Transcribe**.")
-
-transcribe_clicked = st.button(
-    "🎧 Transcribe", type="primary", use_container_width=True,
-    disabled=not (sources and keys),
-)
-
-# --- Run transcription, store the NATIVE transcript in session_state ----------
-# Romanization is applied at DISPLAY time (below) so the toggle can switch
-# between romanized and native instantly, without re-hitting the API.
-if transcribe_clicked and sources and keys:
-    # Clear stale per-result widget + romanize-cache state from a previous run.
-    for k in [k for k in st.session_state
-              if k.startswith("txt_") or k.startswith("roman_openai_")]:
-        del st.session_state[k]
-
-    dead = set()  # keys that failed (retryably) — skipped for the rest of this batch
-    results = []
-    progress = st.progress(0.0, text="Starting…")
-    for idx, (name, raw) in enumerate(sources):
-        progress.progress(idx / len(sources), text=f"Transcribing {name}…")
-        ext = get_ext(name)
-        send_bytes, send_ext, note = maybe_convert_to_mp3(raw, ext)
-        send_name = Path(name).with_suffix("." + send_ext).name
-
-        entry = {"name": name, "audio": raw, "mime": MIME_BY_EXT.get(ext),
-                 "note": note, "text": "", "used": None, "error": None, "model": model}
-        try:
-            if engine == "OpenAI":
-                entry["text"], entry["used"] = transcribe_openai_compatible(
-                    send_bytes, send_name, send_ext, keys, model,
-                    lang_codes["openai"], prompt, dead, OPENAI_URL, "OpenAI")
-            elif engine == "Groq Whisper":
-                entry["text"], entry["used"] = transcribe_openai_compatible(
-                    send_bytes, send_name, send_ext, keys, model,
-                    lang_codes["openai"], prompt, dead, GROQ_URL, "Groq")
-            else:
-                entry["text"], entry["used"] = transcribe_elevenlabs(
-                    send_bytes, send_name, send_ext, keys, lang_codes["elevenlabs"], dead)
-        except Exception as exc:
-            entry["error"] = str(exc)
-        results.append(entry)
-
-    progress.progress(1.0, text="Done.")
-    st.session_state["results"] = results
-    st.session_state["engine_used"] = engine
-    # New run id -> fresh widget keys below, so the text boxes always re-seed
-    # with the new transcript instead of showing the previous run's text.
-    st.session_state["run_id"] = st.session_state.get("run_id", 0) + 1
-
-# --- Render results (romanized vs native chosen live from the toggle) ---------
-results = st.session_state.get("results", [])
-if results:
-    engine_used = st.session_state.get("engine_used", "")
-    run_id = st.session_state.get("run_id", 0)
-    # A tag for the widget key so toggling romanize re-seeds the text box.
-    mode_tag = ("off" if not romanize
-                else "oa" if romanize_method.startswith("OpenAI") else "roman")
-    ok_count = sum(1 for it in results if not it.get("error"))
+with body:
     st.markdown(
-        f'<div class="step-label"><span class="num">2</span> Your transcripts'
-        f'<span class="count">{ok_count}/{len(results)} done</span></div>',
-        unsafe_allow_html=True)
-    zip_items = []
-    for i, item in enumerate(results):
-        with st.container(border=True):
-            st.markdown(
-                f'<div class="file-title"><span class="ic">📄</span>{item["name"]}</div>',
-                unsafe_allow_html=True)
-            if item.get("audio") is not None:
-                st.audio(item["audio"], format=item.get("mime") or "audio/mpeg")
-            if item.get("note"):
-                st.caption(item["note"])
-            if item.get("error"):
-                st.error(item["error"])
-                continue
+        """
+        <div class="hero">
+          <div class="badge">🔊 Speech → Text</div>
+          <div class="emoji">🎙️</div>
+          <h1>Voice Note Transcriber</h1>
+          <p>English · Urdu · Pashto — accurate even when they're mixed together in a single recording.</p>
+          <div class="chips">
+            <span>⚡ 3 engines</span><span>🔁 Auto key-failover</span>
+            <span>🔤 Romanize</span><span>🎤 Record or upload</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-            display, roman_note = resolve_display_text(
-                f"{run_id}_{i}", item["text"], romanize, romanize_method, openai_keys)
+    with st.container(border=True):
+        st.markdown('<div class="step-label"><span class="num">1</span> Add your audio</div>',
+                    unsafe_allow_html=True)
 
-            # Meta pills: engine/model/key used, script mode, and word/char count.
-            pills = []
-            if item.get("used"):
-                model_str = f" · {item['model']}" if item.get("model") else ""
-                pills.append(f'<span class="pill ok">✅ {engine_used}{model_str} · {item["used"]}</span>')
-            pills.append(
-                f'<span class="pill info">🔤 Romanized · {roman_note}</span>' if roman_note
-                else '<span class="pill info">🔡 Native script</span>')
-            pills.append(
-                f'<span class="pill count">📝 {len(display.split())} words · {len(display)} chars</span>')
-            st.markdown(f'<div class="meta-row">{"".join(pills)}</div>', unsafe_allow_html=True)
+        # Record and Upload live in separate tabs so only one is visible at a
+        # time. Both widgets still render (tabs don't unmount), so a recording
+        # AND uploads can both be active — handled explicitly further down.
+        tab_rec, tab_up = st.tabs(["🎙️ Record", "📁 Upload file"])
+        with tab_rec:
+            recorded = st.audio_input("Record from microphone", label_visibility="collapsed")
+            st.markdown('<div class="mic-hero-cap">🎙️ Tap the mic to start recording</div>',
+                        unsafe_allow_html=True)
+        with tab_up:
+            uploaded = st.file_uploader(
+                "Upload voice notes", type=UPLOAD_TYPES, accept_multiple_files=True,
+                help="WhatsApp .opus / .m4a supported. .opus and .amr are auto-converted to mp3.",
+                label_visibility="collapsed",
+            )
 
-            base = Path(item["name"]).stem + ".txt"
-            # run_id + mode_tag in the key so a new transcription (or a romanize
-            # toggle) always re-seeds the box with the right text.
-            edited = st.text_area(
-                "Transcript", value=display, height=170,
-                key=f"txt_{run_id}_{i}_{mode_tag}", label_visibility="collapsed")
+        if engine in ("OpenAI", "Groq Whisper"):
+            with st.expander("✏️ Context prompt (optional — guides spelling, names, mixed language)"):
+                prompt = st.text_area(
+                    "Context prompt", value=DEFAULT_PROMPT, height=90,
+                    label_visibility="collapsed",
+                    help="Steers spelling, names and mixed-language handling. Ignored by ElevenLabs.",
+                )
+        else:
+            prompt = None
+
+    # Combine uploaded files and the mic recording into one list of (name, bytes).
+    # Both inputs can be active at once (the mic clip persists across reruns), so
+    # we process them together rather than silently picking one — but tell the user.
+    n_uploaded = len(uploaded or [])
+    sources = [(uf.name, uf.getvalue()) for uf in (uploaded or [])]
+    if recorded is not None:
+        sources.append(("mic-recording.wav", recorded.getvalue()))
+
+    if not keys:
+        st.warning("🔑 No API key found — add keys in the sidebar or `.streamlit/secrets.toml`.")
+    elif not sources:
+        st.info("⬆️ Record a clip or upload a file above, then press **Transcribe**.")
+    elif n_uploaded and recorded is not None:
+        files_word = "file" if n_uploaded == 1 else "files"
+        st.info(
+            f"🎤 Both an upload ({n_uploaded} {files_word}) **and** a mic recording are "
+            f"ready — all **{len(sources)}** will be transcribed together. Remove the mic "
+            "clip (✕ on the recorder) to transcribe only the upload.")
+
+    btn_label = (f"🎧 Transcribe {len(sources)} clip{'s' if len(sources) != 1 else ''}"
+                 if sources else "🎧 Transcribe")
+    transcribe_clicked = st.button(
+        btn_label, type="primary", use_container_width=True,
+        disabled=not (sources and keys),
+    )
+
+    # --- Run transcription, store the NATIVE transcript in session_state --------
+    # Romanization is applied at DISPLAY time (below) so the toggle can switch
+    # between romanized and native instantly, without re-hitting the API.
+    if transcribe_clicked and sources and keys:
+        # Clear stale per-result widget + romanize-cache state from a previous run.
+        for k in [k for k in st.session_state
+                  if k.startswith("txt_") or k.startswith("roman_openai_")]:
+            del st.session_state[k]
+
+        dead = set()  # keys that failed (retryably) — skipped for the rest of the batch
+        results = []
+        with st.status("Transcribing your audio…", expanded=True) as status:
+            for idx, (name, raw) in enumerate(sources):
+                st.write(f"⬆️ **{name}** — uploading & transcribing "
+                         f"({idx + 1}/{len(sources)})")
+                ext = get_ext(name)
+                send_bytes, send_ext, note = maybe_convert_to_mp3(raw, ext)
+                send_name = Path(name).with_suffix("." + send_ext).name
+
+                entry = {"name": name, "audio": raw, "mime": MIME_BY_EXT.get(ext),
+                         "note": note, "text": "", "used": None, "error": None, "model": model}
+                try:
+                    if engine == "OpenAI":
+                        entry["text"], entry["used"] = transcribe_openai_compatible(
+                            send_bytes, send_name, send_ext, keys, model,
+                            lang_codes["openai"], prompt, dead, OPENAI_URL, "OpenAI")
+                    elif engine == "Groq Whisper":
+                        entry["text"], entry["used"] = transcribe_openai_compatible(
+                            send_bytes, send_name, send_ext, keys, model,
+                            lang_codes["openai"], prompt, dead, GROQ_URL, "Groq")
+                    else:
+                        entry["text"], entry["used"] = transcribe_elevenlabs(
+                            send_bytes, send_name, send_ext, keys, lang_codes["elevenlabs"], dead)
+                except Exception as exc:
+                    entry["error"] = str(exc)
+                results.append(entry)
+
+            ok = sum(1 for it in results if not it.get("error"))
+            st.write("✨ Formatting transcripts…")
+            status.update(label=f"✅ Transcribed {ok}/{len(results)} file(s)",
+                          state="complete", expanded=False)
+
+        st.session_state["results"] = results
+        st.session_state["engine_used"] = engine
+        # New run id -> fresh widget keys below, so the text boxes always re-seed
+        # with the new transcript instead of showing the previous run's text.
+        st.session_state["run_id"] = st.session_state.get("run_id", 0) + 1
+        st.toast("Transcription ready ✨")
+
+    # --- Render results (romanized vs native chosen live from the toggle) -------
+    results = st.session_state.get("results", [])
+    if results:
+        engine_used = st.session_state.get("engine_used", "")
+        run_id = st.session_state.get("run_id", 0)
+        # A tag for the widget key so toggling romanize re-seeds the text box.
+        mode_tag = ("off" if not romanize
+                    else "oa" if romanize_method.startswith("OpenAI") else "roman")
+        ok_count = sum(1 for it in results if not it.get("error"))
+        st.markdown(
+            f'<div class="step-label"><span class="num">2</span> Your transcripts'
+            f'<span class="count">{ok_count}/{len(results)} done</span></div>',
+            unsafe_allow_html=True)
+        zip_items = []
+        used_names = set()  # keeps output .txt names unique across all results
+        for i, item in enumerate(results):
+            with st.container(border=True):
+                st.markdown(
+                    f'<div class="file-title"><span class="ic">📄</span>{item["name"]}</div>',
+                    unsafe_allow_html=True)
+                if item.get("audio") is not None:
+                    st.audio(item["audio"], format=item.get("mime") or "audio/mpeg")
+                if item.get("note"):
+                    st.caption(item["note"])
+                if item.get("error"):
+                    st.error(item["error"])
+                    continue
+
+                display, roman_note = resolve_display_text(
+                    f"{run_id}_{i}", item["text"], romanize, romanize_method, openai_keys)
+
+                # Info pills: engine/model/key used and the script mode.
+                pills = []
+                if item.get("used"):
+                    model_str = f" · {item['model']}" if item.get("model") else ""
+                    pills.append(f'<span class="pill ok">✅ {engine_used}{model_str} · {item["used"]}</span>')
+                pills.append(
+                    f'<span class="pill info">🔤 Romanized · {roman_note}</span>' if roman_note
+                    else '<span class="pill info">🔡 Native script</span>')
+                st.markdown(f'<div class="meta-row">{"".join(pills)}</div>', unsafe_allow_html=True)
+
+                base = unique_name(Path(item["name"]).stem + ".txt", used_names)
+
+                # Header row: TRANSCRIPTION label (left) + Copy / Download (right).
+                h_label, h_copy, h_dl = st.columns([1.5, 1, 1])
+                with h_label:
+                    st.markdown('<div class="result-head">📝 Transcription</div>',
+                                unsafe_allow_html=True)
+                with h_copy:
+                    copy_button(display, key=f"{run_id}_{i}")
+                # run_id + mode_tag in the key so a new transcription (or a romanize
+                # toggle) always re-seeds the box with the right text.
+                edited = st.text_area(
+                    "Transcript", value=display, height=170,
+                    key=f"txt_{run_id}_{i}_{mode_tag}", label_visibility="collapsed")
+                with h_dl:
+                    st.download_button(
+                        "⬇️ .txt", data=edited.encode("utf-8"),
+                        file_name=base, mime="text/plain", key=f"dl_{run_id}_{i}",
+                        use_container_width=True)
+
+                st.markdown(
+                    '<div class="result-meta"><span class="done">✓ Done</span>'
+                    f'<span class="dot">·</span>{len(display.split())} words'
+                    f'<span class="dot">·</span>{len(display)} chars</div>',
+                    unsafe_allow_html=True)
+                zip_items.append((base, edited))
+
+        if len(zip_items) > 1:
             st.download_button(
-                "⬇️ Download .txt", data=edited.encode("utf-8"),
-                file_name=base, mime="text/plain", key=f"dl_{run_id}_{i}",
-                use_container_width=True)
-            zip_items.append((base, edited))
+                "⬇️ Download all transcripts (.zip)", data=build_zip(zip_items),
+                file_name="transcripts.zip", mime="application/zip",
+                key="dl_zip", type="primary", use_container_width=True)
 
-    if len(zip_items) > 1:
-        st.download_button(
-            "⬇️ Download all transcripts (.zip)", data=build_zip(zip_items),
-            file_name="transcripts.zip", mime="application/zip",
-            key="dl_zip", type="primary", use_container_width=True)
-
-st.markdown(
-    '<div class="vt-footer">🎙️ <b>Voice Note Transcriber</b> · '
-    'English · Urdu · Pashto · code-switched speech<br>'
-    'Transcripts stay in your session only — nothing is stored.</div>',
-    unsafe_allow_html=True)
+    st.markdown(
+        '<div class="vt-footer">🎙️ <b>Voice Note Transcriber</b> · '
+        'English · Urdu · Pashto · code-switched speech<br>'
+        'Transcripts stay in your session only — nothing is stored.</div>',
+        unsafe_allow_html=True)

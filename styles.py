@@ -42,11 +42,19 @@ _CSS = f"""
   }}
 
   /* ---------- Cleaner canvas: hide Streamlit chrome ---------- */
+  /* Hide the menu, footer, deploy button and status widget — but NOT the whole
+     toolbar: the collapsed-sidebar expand control lives inside it, so nuking the
+     toolbar would trap users with no way to reopen the sidebar. */
   #MainMenu, footer {{ visibility: hidden; }}
-  /* Keep the header element in the layout (the collapsed-sidebar control lives
-     near it), but make it invisible so it doesn't add a grey bar. */
+  [data-testid="stStatusWidget"] {{ display: none; }}
+  [data-testid="stAppDeployButton"], .stDeployButton {{ display: none; }}
   header[data-testid="stHeader"] {{ background: transparent; }}
-  [data-testid="stToolbar"] {{ display: none; }}
+  /* Keep the sidebar collapse/expand controls always reachable. */
+  [data-testid="stExpandSidebarButton"],
+  [data-testid="stSidebarCollapsedControl"],
+  [data-testid="stSidebarCollapseButton"] {{
+    display: flex !important; visibility: visible !important; opacity: 1 !important;
+  }}
   .block-container {{ padding-top: 2rem; padding-bottom: 3.5rem; }}
 
   /* ---------- Hero ---------- */
